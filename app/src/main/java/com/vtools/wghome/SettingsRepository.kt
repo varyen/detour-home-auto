@@ -17,8 +17,13 @@ class SettingsRepository private constructor(context: Context) {
     private val _automationEnabled = MutableStateFlow(prefs.getBoolean(KEY_ENABLED, false))
     val automationEnabled: StateFlow<Boolean> = _automationEnabled
 
-    private val _tunnelName = MutableStateFlow(prefs.getString(KEY_TUNNEL, "") ?: "")
+    // Имя интерфейса туннеля (для встроенного движка). По умолчанию — wghome.
+    private val _tunnelName = MutableStateFlow(prefs.getString(KEY_TUNNEL, "wghome") ?: "wghome")
     val tunnelName: StateFlow<String> = _tunnelName
+
+    // Текст конфигурации WireGuard (.conf), импортированной пользователем.
+    private val _configText = MutableStateFlow(prefs.getString(KEY_CONFIG, null))
+    val configText: StateFlow<String?> = _configText
 
     private val _homeSsids = MutableStateFlow(readSsids())
     val homeSsids: StateFlow<Set<String>> = _homeSsids
@@ -42,6 +47,21 @@ class SettingsRepository private constructor(context: Context) {
         prefs.edit().putBoolean(KEY_STRICT, enabled).apply()
         _strictWeakSignal.value = enabled
     }
+
+    /** Сохранить импортированный конфиг и имя интерфейса. */
+    fun setConfig(text: String, name: String) {
+        val safeName = name.ifBlank { "wghome" }
+        prefs.edit().putString(KEY_CONFIG, text).putString(KEY_TUNNEL, safeName).apply()
+        _configText.value = text
+        _tunnelName.value = safeName
+    }
+
+    fun clearConfig() {
+        prefs.edit().remove(KEY_CONFIG).apply()
+        _configText.value = null
+    }
+
+    fun hasConfig(): Boolean = !_configText.value.isNullOrBlank()
 
     fun addSsid(ssid: String) {
         val next = readSsids().toMutableSet().apply { add(ssid) }
@@ -70,6 +90,7 @@ class SettingsRepository private constructor(context: Context) {
         private const val KEY_TUNNEL = "tunnel_name"
         private const val KEY_SSIDS = "home_ssids"
         private const val KEY_STRICT = "strict_weak_signal"
+        private const val KEY_CONFIG = "config_text"
 
         @Volatile
         private var instance: SettingsRepository? = null

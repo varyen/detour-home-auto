@@ -1,19 +1,22 @@
 package com.vtools.wghome
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +33,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
@@ -43,7 +48,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -60,6 +64,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +77,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+// Действия, ждущие результата запроса разрешения/согласия.
+private const val ACTION_NONE = 0
+private const val ACTION_ENABLE = 1
+private const val ACTION_TEST = 2
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,27 +111,28 @@ class MainActivity : ComponentActivity() {
 private fun AppRoot() {
     val context = LocalContext.current
     val settings = remember { SettingsRepository.get(context) }
+    val scope = rememberCoroutineScope()
 
     val automationEnabled by settings.automationEnabled.collectAsState()
     val tunnelName by settings.tunnelName.collectAsState()
+    val configText by settings.configText.collectAsState()
     val homeSsids by settings.homeSsids.collectAsState()
     val strictMode by settings.strictWeakSignal.collectAsState()
     val status by AppState.status.collectAsState()
 
     var detectedSsid by remember { mutableStateOf(WifiUtils.currentSsid(context)) }
-    var controlGranted by remember { mutableStateOf(WireGuardController.hasControlPermission(context)) }
-    var pendingEnable by remember { mutableStateOf(false) }
-    val wgInstalled = remember { WireGuardController.isWireGuardInstalled(context) }
+    var batteryOk by remember { mutableStateOf(isIgnoringBatteryOpt(context)) }
+    var pendingAction by remember { mutableStateOf(ACTION_NONE) }
+    val hasConfig = !configText.isNullOrBlank()
 
     val refresh = {
         detectedSsid = WifiUtils.currentSsid(context)
-        controlGranted = WireGuardController.hasControlPermission(context)
+        batteryOk = isIgnoringBatteryOpt(context)
     }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
-    // При открытии приложения до-запускаем сервис, если авторежим включён, но служба не работает
-    // (после переустановки/закрытия/гибели процесса BootReceiver не срабатывает).
+    // До-запуск сервиса при открытии, если авторежим включён, а служба не работает.
     LaunchedEffect(Unit) {
         if (settings.automationEnabled.value &&
             WifiUtils.hasLocationPermission(context) &&
@@ -128,7 +142,6 @@ private fun AppRoot() {
         }
     }
 
-    // Обновляем текущий SSID при возврате в приложение
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -140,67 +153,124 @@ private fun AppRoot() {
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* даже при отказе сервис работает, просто без уведомления */ }
+    ) { }
 
-    val requestNotifIfNeeded = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                context, Manifest.permission.POST_NOTIFICATIONS
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            if (!granted) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    val startMonitoring = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        settings.setAutomationEnabled(true)
+        MonitorService.start(context)
+        pendingAction = ACTION_NONE
+        refresh()
+    }
+
+    val runTest = {
+        pendingAction = ACTION_NONE
+        val text = settings.configText.value
+        if (text.isNullOrBlank()) {
+            toast("Импортируйте конфиг WireGuard")
+        } else {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    TunnelController.tunnelName = settings.tunnelName.value
+                    TunnelController.up(context, TunnelController.parseConfig(text))
+                    withContext(Dispatchers.Main) { toast("Туннель поднят — смотрите статус VPN") }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) { toast("Ошибка: ${TunnelController.describeError(e)}") }
+                }
+            }
+            Unit
         }
     }
 
-    val startMonitoring = {
-        requestNotifIfNeeded()
-        settings.setAutomationEnabled(true)
-        MonitorService.start(context)
+    val vpnConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        val ok = TunnelController.isAuthorized(context)
+        when (pendingAction) {
+            ACTION_ENABLE -> if (ok) startMonitoring() else { toast("Согласие на VPN не дано"); pendingAction = ACTION_NONE }
+            ACTION_TEST -> if (ok) runTest() else { toast("Согласие на VPN не дано"); pendingAction = ACTION_NONE }
+        }
         refresh()
     }
 
     val permsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
-        controlGranted = WireGuardController.hasControlPermission(context)
-        if (pendingEnable) {
-            pendingEnable = false
+        if (pendingAction == ACTION_ENABLE) {
             if (WifiUtils.hasLocationPermission(context)) {
-                startMonitoring()
-                if (wgInstalled && !controlGranted) {
-                    toast("Внимание: не выдано управление WireGuard — VPN переключаться не будет")
-                }
+                val consent = TunnelController.prepareIntent(context)
+                if (consent != null) vpnConsentLauncher.launch(consent) else startMonitoring()
             } else {
                 toast("Нужен точный доступ к геолокации, чтобы определять Wi-Fi сеть")
+                pendingAction = ACTION_NONE
             }
         }
         refresh()
     }
 
-    // Что нужно запросить при включении режима: геолокация (для SSID) и управление WireGuard.
-    val missingPermsForEnable = {
-        val list = mutableListOf<String>()
-        if (!WifiUtils.hasLocationPermission(context)) {
-            list += Manifest.permission.ACCESS_FINE_LOCATION
-            list += Manifest.permission.ACCESS_COARSE_LOCATION
+    val configImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val text = context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader()?.use { it.readText() } ?: ""
+                TunnelController.parseConfig(text) // валидация — бросит, если конфиг битый
+                val name = queryDisplayName(context, uri)
+                settings.setConfig(text, name)
+                toast("Конфиг загружен: $name")
+            } catch (e: Exception) {
+                toast("Не удалось прочитать конфиг: ${e.message}")
+            }
         }
-        if (wgInstalled && !WireGuardController.hasControlPermission(context)) {
-            list += WireGuardController.CONTROL_PERMISSION
-        }
-        list
+        refresh()
     }
 
     val onToggle = { enable: Boolean ->
         if (enable) {
-            val missing = missingPermsForEnable()
-            if (missing.isEmpty()) {
-                startMonitoring()
-            } else {
-                pendingEnable = true
-                permsLauncher.launch(missing.toTypedArray())
+            pendingAction = ACTION_ENABLE
+            when {
+                !settings.hasConfig() -> {
+                    toast("Сначала импортируйте конфиг WireGuard (.conf)")
+                    pendingAction = ACTION_NONE
+                }
+                !WifiUtils.hasLocationPermission(context) ->
+                    permsLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                else -> {
+                    val consent = TunnelController.prepareIntent(context)
+                    if (consent != null) vpnConsentLauncher.launch(consent) else startMonitoring()
+                }
             }
         } else {
             settings.setAutomationEnabled(false)
             MonitorService.stop(context)
+            pendingAction = ACTION_NONE
+            scope.launch(Dispatchers.IO) { try { TunnelController.down(context) } catch (_: Exception) {} }
+            Unit
+        }
+    }
+
+    val onTest = {
+        if (!settings.hasConfig()) {
+            toast("Импортируйте конфиг WireGuard")
+        } else {
+            val consent = TunnelController.prepareIntent(context)
+            if (consent != null) {
+                pendingAction = ACTION_TEST
+                vpnConsentLauncher.launch(consent)
+            } else {
+                runTest()
+            }
         }
     }
 
@@ -208,7 +278,7 @@ private fun AppRoot() {
         val ssid = WifiUtils.currentSsid(context)
         when {
             !WifiUtils.hasLocationPermission(context) -> {
-                pendingEnable = false
+                pendingAction = ACTION_NONE
                 permsLauncher.launch(
                     arrayOf(
                         Manifest.permission.ACCESS_FINE_LOCATION,
@@ -225,9 +295,7 @@ private fun AppRoot() {
         }
     }
 
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("WG Home Auto") }) }
-    ) { inner ->
+    Scaffold(topBar = { TopAppBar(title = { Text("WG Home Auto") }) }) { inner ->
         Column(
             modifier = Modifier
                 .padding(inner)
@@ -236,26 +304,19 @@ private fun AppRoot() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            if (!wgInstalled) {
-                WarningCard(
-                    "Приложение WireGuard не найдено. Установите официальный WireGuard " +
-                        "и включите в нём «Allow remote control apps»."
-                )
+            if (!hasConfig) {
+                WarningCard("Импортируйте конфиг WireGuard (.conf) — без него включать нечего.")
             }
-
-            if (wgInstalled && !controlGranted) {
+            if (!batteryOk) {
                 WarningCard(
-                    "Не выдано разрешение на управление WireGuard. Включите автоматический режим " +
-                        "и подтвердите запрос (или выдайте разрешение в настройках приложения)."
+                    "Для надёжной работы в фоне отключите оптимизацию батареи для приложения " +
+                        "(кнопка ниже)."
                 )
             }
 
             MasterToggleCard(enabled = automationEnabled, onToggle = onToggle)
 
-            StrictModeCard(
-                enabled = strictMode,
-                onChange = { settings.setStrictWeakSignal(it) }
-            )
+            StrictModeCard(enabled = strictMode, onChange = { settings.setStrictWeakSignal(it) })
 
             StatusCard(
                 serviceRunning = status.serviceRunning,
@@ -264,28 +325,16 @@ private fun AppRoot() {
                 isHome = if (status.serviceRunning) status.isHomeNetwork
                 else (detectedSsid != null && homeSsids.contains(detectedSsid)),
                 desiredVpnUp = status.desiredVpnUp,
+                vpnActive = status.vpnActive,
                 signalDbm = status.signalDbm,
                 lastAction = status.lastActionText
             )
 
-            TunnelCard(
+            ConfigCard(
+                hasConfig = hasConfig,
                 tunnelName = tunnelName,
-                wgInstalled = wgInstalled,
-                onTunnelChange = { settings.setTunnelName(it) },
-                onTest = {
-                    when {
-                        !isTunnelNameValid(tunnelName) ->
-                            toast("Сначала введите корректное имя тоннеля")
-                        wgInstalled && !WireGuardController.hasControlPermission(context) -> {
-                            pendingEnable = false
-                            permsLauncher.launch(arrayOf(WireGuardController.CONTROL_PERMISSION))
-                        }
-                        else -> {
-                            WireGuardController.setTunnel(context, up = true, tunnelName = tunnelName)
-                            toast("Команда «включить $tunnelName» отправлена — проверьте WireGuard")
-                        }
-                    }
-                }
+                onImport = { configImportLauncher.launch(arrayOf("*/*")) },
+                onTest = { onTest() }
             )
 
             HomeNetworksCard(
@@ -295,12 +344,25 @@ private fun AppRoot() {
                 onRemove = { settings.removeSsid(it) }
             )
 
+            if (!batteryOk) {
+                Button(
+                    onClick = {
+                        val i = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        runCatching { context.startActivity(i) }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Отключить оптимизацию батареи") }
+            }
+
             OutlinedButton(
                 onClick = {
                     val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                         data = Uri.fromParts("package", context.packageName, null)
                     }
-                    context.startActivity(i)
+                    runCatching { context.startActivity(i) }
                 },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Разрешения приложения") }
@@ -314,9 +376,7 @@ private fun AppRoot() {
 private fun MasterToggleCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
@@ -336,17 +396,11 @@ private fun MasterToggleCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
 private fun StrictModeCard(enabled: Boolean, onChange: (Boolean) -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    "Защита от утечек",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Text("Защита от утечек", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
                 Text(
                     "Дома включать VPN, если сигнал слабый или Wi-Fi без интернета. " +
                         "Сокращает окно незащищённого трафика.",
@@ -367,6 +421,7 @@ private fun StatusCard(
     currentSsid: String?,
     isHome: Boolean,
     desiredVpnUp: Boolean,
+    vpnActive: Boolean,
     signalDbm: Int?,
     lastAction: String
 ) {
@@ -385,12 +440,13 @@ private fun StatusCard(
                 value = if (isHome) "да" else "нет"
             )
             if (signalDbm != null) {
-                StatusRow(
-                    icon = Icons.Filled.Wifi,
-                    label = "Сигнал дома",
-                    value = "$signalDbm dBm"
-                )
+                StatusRow(icon = Icons.Filled.Wifi, label = "Сигнал дома", value = "$signalDbm dBm")
             }
+            StatusRow(
+                icon = if (vpnActive) Icons.Filled.Lock else Icons.Filled.WifiOff,
+                label = "VPN сейчас",
+                value = if (vpnActive) "активен" else "выключен"
+            )
             StatusRow(
                 icon = if (desiredVpnUp) Icons.Filled.CheckCircle else Icons.Filled.WifiOff,
                 label = "Целевое состояние VPN",
@@ -423,50 +479,37 @@ private fun StatusRow(icon: ImageVector, label: String, value: String) {
 }
 
 @Composable
-private fun TunnelCard(
+private fun ConfigCard(
+    hasConfig: Boolean,
     tunnelName: String,
-    wgInstalled: Boolean,
-    onTunnelChange: (String) -> Unit,
+    onImport: () -> Unit,
     onTest: () -> Unit
 ) {
-    val invalid = tunnelName.isNotEmpty() && !isTunnelNameValid(tunnelName)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Тоннель WireGuard", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            Text("Конфигурация WireGuard", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(
-                "Имя тоннеля точно как в приложении WireGuard. Список тоннелей WireGuard не отдаёт " +
-                    "сторонним приложениям, поэтому имя вводится вручную и проверяется кнопкой ниже.",
+                if (hasConfig) "Загружен туннель: $tunnelName"
+                else "Импортируйте файл .conf вашего туннеля WireGuard. VPN поднимает само приложение — " +
+                    "официальный WireGuard больше не нужен.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            OutlinedTextField(
-                value = tunnelName,
-                onValueChange = onTunnelChange,
-                singleLine = true,
-                isError = invalid,
-                placeholder = { Text("например, my-vpn") },
-                supportingText = if (invalid) {
-                    { Text("Допустимо 1–15 символов: латиница, цифры, _ = + . -") }
-                } else null,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedButton(
-                onClick = onTest,
-                enabled = wgInstalled && tunnelName.isNotEmpty() && !invalid,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+            OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.UploadFile, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Проверить (включить тоннель)")
+                Text(if (hasConfig) "Заменить конфиг (.conf)" else "Импортировать конфиг (.conf)")
+            }
+            if (hasConfig) {
+                OutlinedButton(onClick = onTest, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Проверить (поднять туннель)")
+                }
             }
         }
     }
 }
-
-/** Те же правила имени, что и внутри WireGuard (Tunnel.isNameInvalid). */
-private val TUNNEL_NAME_REGEX = Regex("[a-zA-Z0-9_=+.\\-]{1,15}")
-
-private fun isTunnelNameValid(name: String): Boolean = TUNNEL_NAME_REGEX.matches(name)
 
 @Composable
 private fun HomeNetworksCard(
@@ -531,4 +574,21 @@ private fun WarningCard(text: String) {
             Text(text, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+private fun isIgnoringBatteryOpt(context: Context): Boolean {
+    val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+/** Имя выбранного файла (для отображения и имени интерфейса), без расширения .conf. */
+private fun queryDisplayName(context: Context, uri: Uri): String {
+    var name = "wghome"
+    runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) name = c.getString(idx)
+        }
+    }
+    return name.removeSuffix(".conf")
 }

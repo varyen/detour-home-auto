@@ -9,3 +9,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Секреты подписи — НЕ коммитить
+keystore.jks
+keystore.properties

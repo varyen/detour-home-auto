@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Удалённое управление тоннелями официального приложения WireGuard -->
-    <uses-permission android:name="com.wireguard.android.permission.CONTROL_TUNNELS" />
+    <!-- Обязательно: сам поднимаем VPN, движку нужны сетевые сокеты -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Определение текущей Wi-Fi сети. Чтение SSID на Android требует геолокацию. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -15,11 +15,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Видимость пакета WireGuard (требуется на Android 11+ для отправки Intent) -->
-    <queries>
-        <package android:name="com.wireguard.android" />
-    </queries>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="true"

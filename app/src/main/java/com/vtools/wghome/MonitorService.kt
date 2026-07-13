@@ -18,6 +18,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.util.concurrent.Executors
 
 /**
  * Постоянно отслеживает состояние Wi-Fi через ConnectivityManager.NetworkCallback.
@@ -36,8 +37,9 @@ class MonitorService : Service() {
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var pending: Runnable? = null
-    private var lastAppliedVpnUp: Boolean? = null
+    @Volatile private var lastAppliedVpnUp: Boolean? = null
     private var homeSafeState = false   // память гистерезиса: считали ли дом «надёжным»
+    private val vpnExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
@@ -150,10 +152,36 @@ class MonitorService : Service() {
             AppState.update { it.copy(lastActionText = "${d.statusText} (без изменений)") }
             return
         }
-        WireGuardController.setTunnel(this, d.desiredUp, settings.tunnelName.value)
-        lastAppliedVpnUp = d.desiredUp
-        AppState.update { it.copy(lastActionText = d.statusText) }
-        Log.i(TAG, d.statusText)
+        applyVpn(d.desiredUp, d.statusText)
+    }
+
+    /** Управление встроенным туннелем в фоновом потоке (setState блокирующий). */
+    private fun applyVpn(up: Boolean, statusText: String) {
+        vpnExecutor.execute {
+            try {
+                if (up) {
+                    val text = settings.configText.value
+                    if (text.isNullOrBlank()) {
+                        AppState.update { it.copy(lastActionText = "Нет конфига WireGuard — импортируйте .conf") }
+                        return@execute
+                    }
+                    if (!TunnelController.isAuthorized(this)) {
+                        AppState.update { it.copy(lastActionText = "Нет согласия на VPN — откройте приложение") }
+                        return@execute
+                    }
+                    TunnelController.tunnelName = settings.tunnelName.value
+                    TunnelController.up(this, TunnelController.parseConfig(text))
+                } else {
+                    TunnelController.down(this)
+                }
+                lastAppliedVpnUp = up   // фиксируем только при успехе → при ошибке повторим на след. событии
+                AppState.update { it.copy(lastActionText = statusText) }
+                Log.i(TAG, statusText)
+            } catch (e: Exception) {
+                Log.e(TAG, "Ошибка управления туннелем", e)
+                AppState.update { it.copy(lastActionText = "Ошибка VPN: ${TunnelController.describeError(e)}") }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -165,6 +193,7 @@ class MonitorService : Service() {
             } catch (_: Exception) {
             }
         }
+        vpnExecutor.shutdown()
         AppState.update { it.copy(serviceRunning = false) }
     }
 
