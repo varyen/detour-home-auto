@@ -1,6 +1,8 @@
 package com.vtools.wghome
 
 import android.Manifest
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import io.github.varyen.dha.dhcore.Dhcore
 import android.content.ClipboardManager
 import android.content.Context
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Home
@@ -377,6 +380,19 @@ private fun AppRoot() {
         }
     }
 
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { addFromText(it) }
+    }
+    val onScan = {
+        qrLauncher.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Наведите на QR-код профиля из панели Detour")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+        )
+    }
+
     val pendingImport by PendingImport.text.collectAsState()
     LaunchedEffect(pendingImport) {
         PendingImport.take()?.let { addFromText(it) }
@@ -459,6 +475,7 @@ private fun AppRoot() {
                 onRemove = { settings.removeProfile(it.id); probes.remove(it.id) },
                 onImport = { configImportLauncher.launch(arrayOf("*/*")) },
                 onPaste = { showPaste = true },
+                onScan = onScan,
                 onTest = { onTest() }
             )
 
@@ -622,6 +639,7 @@ private fun ProfilesCard(
     onRemove: (VpnProfile) -> Unit,
     onImport: () -> Unit,
     onPaste: () -> Unit,
+    onScan: () -> Unit,
     onTest: () -> Unit
 ) {
     var confirmRemove by remember { mutableStateOf<VpnProfile?>(null) }
@@ -639,7 +657,7 @@ private fun ProfilesCard(
             Text("Профили VPN", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(
                 if (profiles.isEmpty()) "WireGuard и AmneziaWG — файлом .conf, VLESS (Reality, ws, xhttp), " +
-                    "Trojan, Shadowsocks, Hysteria2 — ссылкой. Подойдут и ссылки из панели Detour."
+                    "Trojan, Shadowsocks, Hysteria2 — ссылкой. QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут."
                 else "Вне дома включается отмеченный профиль",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -676,6 +694,11 @@ private fun ProfilesCard(
                     Spacer(Modifier.width(6.dp))
                     Text("Ссылка", maxLines = 1)
                 }
+            }
+            OutlinedButton(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Сканировать QR-код")
             }
             if (profiles.isNotEmpty()) {
                 OutlinedButton(onClick = onTest, modifier = Modifier.fillMaxWidth()) {

@@ -56,6 +56,13 @@ func parseProfile(text, fallbackName string) (*Profile, error) {
 	if text == "" {
 		return nil, errors.New("пусто")
 	}
+	if strings.HasPrefix(strings.ToLower(text), "vpn://") {
+		conf, ok := confFromAmneziaKey(text)
+		if !ok {
+			return nil, errors.New("в ключе vpn:// нет конфигурации WireGuard/AmneziaWG — выгрузите из Amnezia файл .conf")
+		}
+		text = conf
+	}
 	if strings.Contains(strings.ToLower(text), "[interface]") {
 		return parseWgConf(text, fallbackName)
 	}

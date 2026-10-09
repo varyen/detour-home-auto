@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Обязательно: сам поднимаем VPN, движку нужны сетевые сокеты -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -19,6 +20,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Сканер QR-кода профиля из панели Detour. Камера не обязательна: без неё — ссылкой или файлом. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -48,6 +53,7 @@
                 <data android:scheme="ss" />
                 <data android:scheme="hysteria2" />
                 <data android:scheme="hy2" />
+                <data android:scheme="vpn" />
             </intent-filter>
             <!-- «Поделиться» ссылкой или текстом .conf -->
             <intent-filter>
@@ -56,6 +62,12 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <!-- Экран сканера ZXing по умолчанию альбомный — разрешаем поворот -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="fullSensor"
+            tools:replace="screenOrientation" />
 
         <service
             android:name=".DhaVpnService"

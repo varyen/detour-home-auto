@@ -32,8 +32,8 @@ android {
         applicationId = "com.vtools.wghome"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "3.0"
+        versionCode = 5
+        versionName = "3.1"
 
     }
 
@@ -98,6 +98,9 @@ dependencies {
 
     // Движок на mihomo (WireGuard, AmneziaWG, VLESS…): собирается core/build-android.ps1
     implementation(files("libs/dhcore.aar"))
+
+    // Сканер QR (ZXing): работает и без сервисов Google — на телевизорах и в прошивках без GMS
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

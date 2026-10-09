@@ -30,6 +30,7 @@ struct ContentView: View {
     @State private var newSSID = ""
     @State private var toast: String?
     @State private var showLog = false
+    @State private var showScanner = false
 
     var body: some View {
         NavigationView {
@@ -65,7 +66,7 @@ struct ContentView: View {
                 }
 
                 Section(header: Text("Профили VPN"),
-                        footer: Text("WireGuard и AmneziaWG — файлом .conf; VLESS (Reality, ws, xhttp), Trojan, Shadowsocks, Hysteria2 — ссылкой. Подойдут ссылки из панели Detour.")) {
+                        footer: Text("WireGuard и AmneziaWG — файлом .conf; VLESS (Reality, ws, xhttp), Trojan, Shadowsocks, Hysteria2 — ссылкой. QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут.")) {
                     ForEach(store.profiles) { p in
                         HStack {
                             Image(systemName: p.id == store.active?.id ? "largecircle.fill.circle" : "circle")
@@ -95,6 +96,7 @@ struct ContentView: View {
                         pasteText = clip.contains("://") || clip.lowercased().contains("[interface]") ? clip : ""
                         showPaste = true
                     } label: { Label("Ссылка", systemImage: "doc.on.clipboard") }
+                    Button { showScanner = true } label: { Label("Сканировать QR-код", systemImage: "qrcode.viewfinder") }
                 }
 
                 Section(header: Text("Домашние сети"), footer: Text("В этих сетях VPN выключается.")) {
@@ -139,6 +141,7 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showPaste) { pasteSheet }
             .sheet(isPresented: $showLog) { logSheet }
+            .fullScreenCover(isPresented: $showScanner) { scannerSheet }
             .alert(toast ?? "", isPresented: Binding(get: { toast != nil }, set: { if !$0 { toast = nil } })) {
                 Button("OK", role: .cancel) {}
             }
@@ -163,6 +166,20 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var scannerSheet: some View {
+        NavigationView {
+            QRScannerView { code in
+                showScanner = false
+                add(code, name: "")
+            }
+            .ignoresSafeArea()
+            .navigationTitle("QR-код профиля")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { showScanner = false } } }
+        }
+        .navigationViewStyle(.stack)
     }
 
     private var logSheet: some View {

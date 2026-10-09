@@ -11,7 +11,8 @@ VPN встроен в приложение. С 3.0 движок — **mihomo** (
 | VLESS (Reality, TLS, ws, grpc, xhttp) | ссылка `vless://…` |
 | Trojan, Shadowsocks, VMess, Hysteria2 | ссылка |
 
-Подходят те же `.conf` и ссылки, что отдаёт панель Detour (свой VPN-сервер роутера, «ссылка на профиль»).
+Подходят те же `.conf` и ссылки, что отдаёт панель Detour (свой VPN-сервер роутера, «ссылка на профиль»), а с 3.1 —
+и **QR-код** из её настроек (кнопка «Сканировать QR-код»), и ключ AmneziaVPN `vpn://…`.
 Профилей может быть несколько; вне дома включается отмеченный. Кнопка с датчиком меряет задержку через
 профиль, не поднимая туннель. Ссылку `vless://` можно открыть прямо в приложении или «поделиться» в него.
 
@@ -81,6 +82,7 @@ VPN встроен в приложение. С 3.0 движок — **mihomo** (
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Освобождение от Doze для надёжной работы в фоне |
 | `BIND_VPN_SERVICE` | Собственный VPN-сервис `DhaVpnService` |
 | `ACCESS_WIFI_STATE`, `ACCESS_NETWORK_STATE` | Чтение состояния сети и уровня сигнала |
+| `CAMERA` | Сканер QR-кода профиля (необязательно: камера спрашивается только при сканировании) |
 
 ---
 
@@ -178,3 +180,10 @@ sh ios/build.sh           # xcodegen + xcodebuild archive + ldid → ios/build/D
 ```
 Подписи Apple нет: entitlements (`networking.networkextension`, `wifi-info`) вшивает `ldid`, ставится через
 TrollStore. Для обычной установки нужен платный аккаунт Apple Developer — без него Network Extension iOS не даёт.
+
+---
+
+## Лицензия
+
+[GPL-3.0](LICENSE). Ядро собрано из [mihomo](https://github.com/MetaCubeX/mihomo) (GPL-3.0) и вшито в APK и `.ipa`
+одним бинарником, поэтому весь проект и готовые сборки распространяются на тех же условиях.
