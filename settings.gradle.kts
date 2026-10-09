@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WgHomeAuto"
+rootProject.name = "DetourHomeAuto"
 include(":app")

@@ -18,6 +18,11 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 
 /**
@@ -36,33 +41,62 @@ class MonitorService : Service() {
     private val handler = Handler(Looper.getMainLooper())
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var foregroundOk = false
     private var pending: Runnable? = null
     @Volatile private var lastAppliedVpnUp: Boolean? = null
     private var homeSafeState = false   // память гистерезиса: считали ли дом «надёжным»
     private val vpnExecutor = Executors.newSingleThreadExecutor()
+    private val scope = MainScope()
 
     override fun onCreate() {
         super.onCreate()
         settings = SettingsRepository.get(this)
         cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         createChannel()
-        goForeground("Запуск мониторинга…")
+        if (!goForeground("Запуск мониторинга…")) {
+            // Android 14+ запрещает старт FGS типа location из фона без «геолокация всегда».
+            // Раньше это валило процесс при загрузке телефона — теперь просто не стартуем.
+            AppState.update {
+                it.copy(serviceRunning = false, lastActionText = FG_DENIED_TEXT)
+            }
+            stopSelf()
+            return
+        }
+        foregroundOk = true
         registerCallback()
         AppState.update { it.copy(serviceRunning = true) }
         evaluateSoon()
+        // Сеть не менялась, а список домашних сетей или строгий режим — да: пересчитать сразу.
+        scope.launch {
+            combine(settings.homeSsids, settings.strictWeakSignal) { a, b -> a to b }
+                .drop(1)
+                .collect { evaluateSoon() }
+        }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundOk) {
+            // onCreate не смог уйти в foreground — не даём системе перезапускать нас по кругу.
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun goForeground(text: String) {
+    /** @return true, если сервис действительно перешёл в foreground. */
+    private fun goForeground(text: String): Boolean = try {
         val notification = buildNotification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
             startForeground(NOTIF_ID, notification)
         }
+        true
+    } catch (e: Exception) {
+        Log.e(TAG, "startForeground отклонён системой", e)
+        false
     }
 
     private fun registerCallback() {
@@ -155,22 +189,21 @@ class MonitorService : Service() {
         applyVpn(d.desiredUp, d.statusText)
     }
 
-    /** Управление встроенным туннелем в фоновом потоке (setState блокирующий). */
+    /** Управление встроенным туннелем в фоновом потоке (up/down блокирующие). */
     private fun applyVpn(up: Boolean, statusText: String) {
         vpnExecutor.execute {
             try {
                 if (up) {
-                    val text = settings.configText.value
-                    if (text.isNullOrBlank()) {
-                        AppState.update { it.copy(lastActionText = "Нет конфига WireGuard — импортируйте .conf") }
+                    val profile = settings.activeProfile()
+                    if (profile == null) {
+                        AppState.update { it.copy(lastActionText = "Нет профиля — добавьте .conf или ссылку") }
                         return@execute
                     }
                     if (!TunnelController.isAuthorized(this)) {
                         AppState.update { it.copy(lastActionText = "Нет согласия на VPN — откройте приложение") }
                         return@execute
                     }
-                    TunnelController.tunnelName = settings.tunnelName.value
-                    TunnelController.up(this, TunnelController.parseConfig(text))
+                    TunnelController.up(this, profile)
                 } else {
                     TunnelController.down(this)
                 }
@@ -187,6 +220,7 @@ class MonitorService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         pending?.let { handler.removeCallbacks(it) }
+        scope.cancel()
         networkCallback?.let {
             try {
                 cm.unregisterNetworkCallback(it)
@@ -205,7 +239,7 @@ class MonitorService : Service() {
             CHANNEL_ID,
             "Мониторинг Wi-Fi",
             NotificationManager.IMPORTANCE_LOW
-        ).apply { description = "Отслеживание домашней сети для управления WireGuard" }
+        ).apply { description = "Отслеживание домашней сети для управления VPN" }
         nm.createNotificationChannel(channel)
     }
 
@@ -216,7 +250,7 @@ class MonitorService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("WG Home Auto")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat_shield)
             .setOngoing(true)
@@ -244,12 +278,22 @@ class MonitorService : Service() {
         private const val RSSI_ENTER_SAFE = -70
         private const val RSSI_EXIT_SAFE = -80
 
+        /** Текст для UI, когда система не дала уйти в foreground. */
+        const val FG_DENIED_TEXT =
+            "Android не дал запустить службу в фоне — нужна геолокация «Разрешать всегда»"
+
         fun start(context: Context) {
             val intent = Intent(context, MonitorService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                // ForegroundServiceStartNotAllowedException и подобное — не роняем приложение.
+                Log.e(TAG, "Не удалось запустить MonitorService", e)
+                AppState.update { it.copy(serviceRunning = false, lastActionText = FG_DENIED_TEXT) }
             }
         }
 

@@ -15,6 +15,7 @@ data class MonitorStatus(
     val desiredVpnUp: Boolean = false,
     val vpnActive: Boolean = false,   // реальное состояние встроенного туннеля (из onStateChange)
     val signalDbm: Int? = null,       // уровень сигнала домашней сети, dBm (null если не на домашней)
+    val activeProfileName: String? = null,
     val lastActionText: String = "—"
 )
 

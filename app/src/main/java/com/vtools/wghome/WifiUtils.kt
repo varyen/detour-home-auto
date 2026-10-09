@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 
 /** Снимок состояния текущей Wi-Fi: имя, уровень сигнала (dBm), есть ли реально интернет. */
@@ -24,6 +25,19 @@ object WifiUtils {
     fun hasLocationPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Геолокация «Разрешать всегда». Нужна для двух вещей:
+     *  - чтение SSID, когда приложение в фоне;
+     *  - запуск foreground-сервиса типа `location` из фона (после перезагрузки).
+     * На Android 14+ без неё `startForeground(..., FOREGROUND_SERVICE_TYPE_LOCATION)` из фона
+     * бросает SecurityException.
+     */
+    fun hasBackgroundLocationPermission(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
 
     /** Убирает кавычки и служебные значения, возвращает чистый SSID или null. */
     fun normalizeSsid(raw: String?): String? {

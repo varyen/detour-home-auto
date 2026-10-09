@@ -1,0 +1,93 @@
+# xcodegen-спецификация iOS-версии Detour Home Auto.
+#  * DetourHome — приложение (SwiftUI): профили, домашние сети, правила On-Demand;
+#  * DetourHomeTunnel — Network Extension (packet-tunnel), внутри ядро Dhcore (mihomo);
+#  * Dhcore.xcframework собирает core/build-ios.sh (gomobile);
+#  * подпись выключена: аккаунта Apple Developer нет, .ipa собирается без подписи,
+#    entitlements вшивает ldid (см. build-ios.sh в корне ios/).
+name: DetourHome
+options:
+  bundleIdPrefix: io.github.varyen.detourhome
+  deploymentTarget:
+    iOS: 15.0
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGN_STYLE: Manual
+    MARKETING_VERSION: "3.0"
+    CURRENT_PROJECT_VERSION: "4"
+    SWIFT_VERSION: 5.0
+    ENABLE_BITCODE: false
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  DetourHome:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Detour Home Auto
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocationWhenInUseUsageDescription: Чтобы узнать имя текущей Wi-Fi сети и добавить её в домашние.
+        CFBundleURLTypes:
+          - CFBundleURLName: profile-links
+            CFBundleURLSchemes: [vless, vmess, trojan, ss, hysteria2, hy2]
+        LSSupportsOpeningDocumentsInPlace: false
+        UIFileSharingEnabled: false
+    entitlements:
+      path: App/DetourHome.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        com.apple.developer.networking.wifi-info: true
+    settings:
+      base:
+        PRODUCT_NAME: DetourHome
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.varyen.detourhome
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+    dependencies:
+      - framework: Frameworks/Dhcore.xcframework
+        embed: true
+        codeSign: false
+      - target: DetourHomeTunnel
+        embed: true
+      - sdk: libresolv.tbd
+      - sdk: NetworkExtension.framework
+  DetourHomeTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Tunnel
+    info:
+      path: Tunnel/Info.plist
+      properties:
+        CFBundleDisplayName: Detour Home Tunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    entitlements:
+      path: Tunnel/DetourHomeTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+    settings:
+      base:
+        PRODUCT_NAME: DetourHomeTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.varyen.detourhome.tunnel
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+    dependencies:
+      - framework: Frameworks/Dhcore.xcframework
+        embed: false
+      - sdk: libresolv.tbd
+      - sdk: NetworkExtension.framework

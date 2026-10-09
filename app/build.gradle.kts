@@ -32,13 +32,9 @@ android {
         applicationId = "com.vtools.wghome"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 4
+        versionName = "3.0"
 
-        // Только нужные ABI: покрывает практически все актуальные телефоны, размер APK меньше.
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-        }
     }
 
     buildTypes {
@@ -74,6 +70,20 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        // Ядро ~70 МБ на ABI; сжатое в APK — ~24 МБ. Без этого APK весит втрое больше.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    // Отдельный APK на архитектуру: в каждом только своё ядро.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
     }
 }
 
@@ -86,8 +96,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Встроенный движок WireGuard (готовые нативные .so, NDK не требуется)
-    implementation("com.wireguard.android:tunnel:1.0.20260102")
+    // Движок на mihomo (WireGuard, AmneziaWG, VLESS…): собирается core/build-android.ps1
+    implementation(files("libs/dhcore.aar"))
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

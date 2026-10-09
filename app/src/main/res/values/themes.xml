@@ -1,6 +1,6 @@
 <resources>
     <!-- Тема-заглушка для окна Activity; сам UI рисуется средствами Compose. -->
-    <style name="Theme.WgHomeAuto" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.DetourHomeAuto" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">?android:attr/colorBackground</item>
     </style>
 </resources>

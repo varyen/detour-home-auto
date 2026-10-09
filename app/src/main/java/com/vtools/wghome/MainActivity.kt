@@ -1,6 +1,8 @@
 package com.vtools.wghome
 
 import android.Manifest
+import io.github.varyen.dha.dhcore.Dhcore
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -31,7 +33,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
@@ -39,7 +44,11 @@ import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ColorScheme
@@ -62,6 +71,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -71,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,8 +98,14 @@ private const val ACTION_ENABLE = 1
 private const val ACTION_TEST = 2
 
 class MainActivity : ComponentActivity() {
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        PendingImport.offer(this, intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PendingImport.offer(this, intent)
         setContent {
             val dark = isSystemInDarkTheme()
             val colors: ColorScheme = when {
@@ -114,20 +131,26 @@ private fun AppRoot() {
     val scope = rememberCoroutineScope()
 
     val automationEnabled by settings.automationEnabled.collectAsState()
-    val tunnelName by settings.tunnelName.collectAsState()
-    val configText by settings.configText.collectAsState()
+    val profiles by settings.profiles.collectAsState()
+    val activeId by settings.activeId.collectAsState()
     val homeSsids by settings.homeSsids.collectAsState()
     val strictMode by settings.strictWeakSignal.collectAsState()
     val status by AppState.status.collectAsState()
 
     var detectedSsid by remember { mutableStateOf(WifiUtils.currentSsid(context)) }
     var batteryOk by remember { mutableStateOf(isIgnoringBatteryOpt(context)) }
+    var bgLocationOk by remember { mutableStateOf(WifiUtils.hasBackgroundLocationPermission(context)) }
     var pendingAction by remember { mutableStateOf(ACTION_NONE) }
-    val hasConfig = !configText.isNullOrBlank()
+    val hasConfig = profiles.isNotEmpty()
+    val activeProfile = profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull()
+    val probes = remember { mutableStateMapOf<String, String>() }
+    var showPaste by remember { mutableStateOf(false) }
+    var engineLog by remember { mutableStateOf<String?>(null) }
 
     val refresh = {
         detectedSsid = WifiUtils.currentSsid(context)
         batteryOk = isIgnoringBatteryOpt(context)
+        bgLocationOk = WifiUtils.hasBackgroundLocationPermission(context)
     }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -155,6 +178,28 @@ private fun AppRoot() {
         ActivityResultContracts.RequestPermission()
     ) { }
 
+    // На Android 11+ системного диалога для «всегда» нет — запрос сразу отклоняется,
+    // поэтому уводим пользователя в настройки приложения.
+    val bgLocationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        refresh()
+        if (!granted) {
+            toast("Геолокация → выберите «Разрешать всегда»")
+            openAppSettings(context)
+        }
+    }
+
+    val requestBgLocation = {
+        if (!WifiUtils.hasLocationPermission(context)) {
+            toast("Сначала разрешите доступ к геолокации в настройках")
+            openAppSettings(context)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            bgLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+        Unit
+    }
+
     val startMonitoring = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -170,15 +215,14 @@ private fun AppRoot() {
 
     val runTest = {
         pendingAction = ACTION_NONE
-        val text = settings.configText.value
-        if (text.isNullOrBlank()) {
-            toast("Импортируйте конфиг WireGuard")
+        val profile = settings.activeProfile()
+        if (profile == null) {
+            toast("Добавьте профиль")
         } else {
             scope.launch(Dispatchers.IO) {
                 try {
-                    TunnelController.tunnelName = settings.tunnelName.value
-                    TunnelController.up(context, TunnelController.parseConfig(text))
-                    withContext(Dispatchers.Main) { toast("Туннель поднят — смотрите статус VPN") }
+                    TunnelController.up(context, profile)
+                    withContext(Dispatchers.Main) { toast("Туннель поднят: ${profile.name}") }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) { toast("Ошибка: ${TunnelController.describeError(e)}") }
                 }
@@ -220,12 +264,11 @@ private fun AppRoot() {
             try {
                 val text = context.contentResolver.openInputStream(uri)
                     ?.bufferedReader()?.use { it.readText() } ?: ""
-                TunnelController.parseConfig(text) // валидация — бросит, если конфиг битый
-                val name = queryDisplayName(context, uri)
-                settings.setConfig(text, name)
-                toast("Конфиг загружен: $name")
+                val p = VpnProfile.parse(text, queryDisplayName(context, uri))
+                settings.addProfile(p)
+                toast("Добавлен профиль: ${p.name} (${p.kindLabel})")
             } catch (e: Exception) {
-                toast("Не удалось прочитать конфиг: ${e.message}")
+                toast("Не удалось прочитать: ${TunnelController.describeError(e)}")
             }
         }
         refresh()
@@ -235,8 +278,8 @@ private fun AppRoot() {
         if (enable) {
             pendingAction = ACTION_ENABLE
             when {
-                !settings.hasConfig() -> {
-                    toast("Сначала импортируйте конфиг WireGuard (.conf)")
+                !settings.hasProfile() -> {
+                    toast("Сначала добавьте профиль: .conf или ссылку")
                     pendingAction = ACTION_NONE
                 }
                 !WifiUtils.hasLocationPermission(context) ->
@@ -261,8 +304,8 @@ private fun AppRoot() {
     }
 
     val onTest = {
-        if (!settings.hasConfig()) {
-            toast("Импортируйте конфиг WireGuard")
+        if (!settings.hasProfile()) {
+            toast("Добавьте профиль")
         } else {
             val consent = TunnelController.prepareIntent(context)
             if (consent != null) {
@@ -295,7 +338,74 @@ private fun AppRoot() {
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("WG Home Auto") }) }) { inner ->
+    val onSelect = { p: VpnProfile ->
+        settings.setActive(p.id)
+        if (TunnelController.isUp()) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    TunnelController.up(context, p)
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) { toast("Ошибка: ${TunnelController.describeError(e)}") }
+                }
+            }
+        }
+        Unit
+    }
+
+    val onProbe = { p: VpnProfile ->
+        probes[p.id] = "проверка…"
+        scope.launch(Dispatchers.IO) {
+            val r = try {
+                "${TunnelController.probe(p)} мс"
+            } catch (e: Exception) {
+                "ошибка: ${TunnelController.describeError(e)}"
+            }
+            withContext(Dispatchers.Main) { probes[p.id] = r }
+        }
+        Unit
+    }
+
+    val addFromText = { text: String ->
+        try {
+            val p = VpnProfile.parse(text, "")
+            settings.addProfile(p)
+            toast("Добавлен профиль: ${p.name} (${p.kindLabel})")
+            true
+        } catch (e: Exception) {
+            toast("Не разобрал: ${TunnelController.describeError(e)}")
+            false
+        }
+    }
+
+    val pendingImport by PendingImport.text.collectAsState()
+    LaunchedEffect(pendingImport) {
+        PendingImport.take()?.let { addFromText(it) }
+    }
+
+    engineLog?.let { text ->
+        AlertDialog(
+            onDismissRequest = { engineLog = null },
+            title = { Text("Журнал движка") },
+            text = {
+                Text(
+                    text.ifBlank { "Пусто — движок ещё не запускался" },
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = { TextButton(onClick = { engineLog = null }) { Text("Закрыть") } }
+        )
+    }
+
+    if (showPaste) {
+        PasteDialog(
+            initial = clipboardText(context),
+            onDismiss = { showPaste = false },
+            onAdd = { if (addFromText(it)) showPaste = false }
+        )
+    }
+
+    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { inner ->
         Column(
             modifier = Modifier
                 .padding(inner)
@@ -305,12 +415,21 @@ private fun AppRoot() {
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             if (!hasConfig) {
-                WarningCard("Импортируйте конфиг WireGuard (.conf) — без него включать нечего.")
+                WarningCard("Добавьте профиль: .conf WireGuard/AmneziaWG или ссылку vless:// — без него включать нечего.")
             }
             if (!batteryOk) {
                 WarningCard(
                     "Для надёжной работы в фоне отключите оптимизацию батареи для приложения " +
                         "(кнопка ниже)."
+                )
+            }
+            if (!bgLocationOk) {
+                WarningCard(
+                    "Автозапуск после перезагрузки телефона не сработает: Android требует " +
+                        "геолокацию «Разрешать всегда». Без неё система блокирует запуск службы " +
+                        "мониторинга из фона.",
+                    actionLabel = "Разрешить «Всегда»",
+                    onAction = requestBgLocation
                 )
             }
 
@@ -327,13 +446,19 @@ private fun AppRoot() {
                 desiredVpnUp = status.desiredVpnUp,
                 vpnActive = status.vpnActive,
                 signalDbm = status.signalDbm,
-                lastAction = status.lastActionText
+                lastAction = status.lastActionText,
+                profileName = activeProfile?.let { "${it.name} · ${it.kindLabel}" }
             )
 
-            ConfigCard(
-                hasConfig = hasConfig,
-                tunnelName = tunnelName,
+            ProfilesCard(
+                profiles = profiles,
+                activeId = activeProfile?.id,
+                probes = probes,
+                onSelect = onSelect,
+                onProbe = onProbe,
+                onRemove = { settings.removeProfile(it.id); probes.remove(it.id) },
                 onImport = { configImportLauncher.launch(arrayOf("*/*")) },
+                onPaste = { showPaste = true },
                 onTest = { onTest() }
             )
 
@@ -356,6 +481,11 @@ private fun AppRoot() {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Отключить оптимизацию батареи") }
             }
+
+            OutlinedButton(
+                onClick = { engineLog = Dhcore.recentLog().lines().takeLast(80).joinToString("\n") },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Журнал движка") }
 
             OutlinedButton(
                 onClick = {
@@ -423,7 +553,8 @@ private fun StatusCard(
     desiredVpnUp: Boolean,
     vpnActive: Boolean,
     signalDbm: Int?,
-    lastAction: String
+    lastAction: String,
+    profileName: String?
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -447,6 +578,9 @@ private fun StatusCard(
                 label = "VPN сейчас",
                 value = if (vpnActive) "активен" else "выключен"
             )
+            if (profileName != null) {
+                StatusRow(icon = Icons.Filled.VpnKey, label = "Профиль", value = profileName)
+            }
             StatusRow(
                 icon = if (desiredVpnUp) Icons.Filled.CheckCircle else Icons.Filled.WifiOff,
                 label = "Целевое состояние VPN",
@@ -479,36 +613,100 @@ private fun StatusRow(icon: ImageVector, label: String, value: String) {
 }
 
 @Composable
-private fun ConfigCard(
-    hasConfig: Boolean,
-    tunnelName: String,
+private fun ProfilesCard(
+    profiles: List<VpnProfile>,
+    activeId: String?,
+    probes: Map<String, String>,
+    onSelect: (VpnProfile) -> Unit,
+    onProbe: (VpnProfile) -> Unit,
+    onRemove: (VpnProfile) -> Unit,
     onImport: () -> Unit,
+    onPaste: () -> Unit,
     onTest: () -> Unit
 ) {
+    var confirmRemove by remember { mutableStateOf<VpnProfile?>(null) }
+    confirmRemove?.let { p ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text("Удалить профиль?") },
+            text = { Text(p.name) },
+            confirmButton = { TextButton(onClick = { onRemove(p); confirmRemove = null }) { Text("Удалить") } },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Отмена") } }
+        )
+    }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Конфигурация WireGuard", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            Text("Профили VPN", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(
-                if (hasConfig) "Загружен туннель: $tunnelName"
-                else "Импортируйте файл .conf вашего туннеля WireGuard. VPN поднимает само приложение — " +
-                    "официальный WireGuard больше не нужен.",
+                if (profiles.isEmpty()) "WireGuard и AmneziaWG — файлом .conf, VLESS (Reality, ws, xhttp), " +
+                    "Trojan, Shadowsocks, Hysteria2 — ссылкой. Подойдут и ссылки из панели Detour."
+                else "Вне дома включается отмеченный профиль",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.UploadFile, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (hasConfig) "Заменить конфиг (.conf)" else "Импортировать конфиг (.conf)")
+            profiles.forEach { p ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    RadioButton(selected = p.id == activeId, onClick = { onSelect(p) })
+                    Column(Modifier.weight(1f)) {
+                        Text(p.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            listOfNotNull(p.kindLabel, p.server.takeIf { it.isNotBlank() }, probes[p.id]).joinToString(" · "),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { onProbe(p) }) {
+                        Icon(Icons.Filled.Speed, contentDescription = "Проверить задержку")
+                    }
+                    IconButton(onClick = { confirmRemove = p }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
-            if (hasConfig) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.UploadFile, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Файл .conf", maxLines = 1)
+                }
+                OutlinedButton(onClick = onPaste, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Ссылка", maxLines = 1)
+                }
+            }
+            if (profiles.isNotEmpty()) {
                 OutlinedButton(onClick = onTest, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Проверить (поднять туннель)")
+                    Text("Поднять туннель сейчас")
                 }
             }
         }
     }
+}
+
+@Composable
+private fun PasteDialog(initial: String, onDismiss: () -> Unit, onAdd: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Добавить по ссылке") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("vless://… или текст .conf") },
+                minLines = 3,
+                maxLines = 8,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = { TextButton(onClick = { onAdd(text) }, enabled = text.isNotBlank()) { Text("Добавить") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
+    )
 }
 
 @Composable
@@ -563,17 +761,34 @@ private fun HomeNetworksCard(
 }
 
 @Composable
-private fun WarningCard(text: String) {
+private fun WarningCard(
+    text: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     ) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
-            Spacer(Modifier.width(12.dp))
-            Text(text, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                Spacer(Modifier.width(12.dp))
+                Text(text, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (actionLabel != null && onAction != null) {
+                Button(onClick = onAction, modifier = Modifier.fillMaxWidth()) { Text(actionLabel) }
+            }
         }
     }
+}
+
+/** Экран «О приложении» в системных настройках — оттуда выдают геолокацию «Всегда». */
+private fun openAppSettings(context: Context) {
+    val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+        data = Uri.fromParts("package", context.packageName, null)
+    }
+    runCatching { context.startActivity(i) }
 }
 
 private fun isIgnoringBatteryOpt(context: Context): Boolean {
@@ -583,12 +798,18 @@ private fun isIgnoringBatteryOpt(context: Context): Boolean {
 
 /** Имя выбранного файла (для отображения и имени интерфейса), без расширения .conf. */
 private fun queryDisplayName(context: Context, uri: Uri): String {
-    var name = "wghome"
+    var name = "WireGuard"
     runCatching {
         context.contentResolver.query(uri, null, null, null, null)?.use { c ->
             val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (idx >= 0 && c.moveToFirst()) name = c.getString(idx)
         }
     }
-    return name.removeSuffix(".conf")
+    return name.substringBeforeLast('.', name)
+}
+
+private fun clipboardText(context: Context): String {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+    return if (t.contains("://") || t.contains("[Interface]", ignoreCase = true)) t.trim() else ""
 }

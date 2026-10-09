@@ -13,3 +13,10 @@ local.properties
 # Секреты подписи — НЕ коммитить
 keystore.jks
 keystore.properties
+
+# Сборка ядра и рабочие файлы
+/app/libs/
+/.work/
+
+# Готовые сборки
+/releases/

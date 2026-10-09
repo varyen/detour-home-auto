@@ -2,77 +2,153 @@ package com.vtools.wghome
 
 import android.content.Context
 import android.content.Intent
+import android.net.IpPrefix
+import android.net.VpnService
+import android.os.Build
 import android.util.Log
-import com.wireguard.android.backend.BackendException
-import com.wireguard.android.backend.GoBackend
-import com.wireguard.android.backend.Tunnel
-import com.wireguard.config.Config
-import java.io.BufferedReader
-import java.io.StringReader
+import io.github.varyen.dha.dhcore.Dhcore
+import java.net.InetAddress
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 
 /**
- * Встроенный WireGuard. Туннель поднимает НАШ процесс через GoBackend (нативный движок wg-go,
- * идёт в составе библиотеки com.wireguard.android:tunnel). Никакой зависимости от стороннего
- * приложения и его фоновых ограничений.
+ * Встроенный VPN: свой VpnService + движок mihomo (dhcore). Один движок на все
+ * протоколы — WireGuard, AmneziaWG, VLESS и прочие ссылки.
  *
- * ВНИМАНИЕ: up()/down()/currentState() блокирующие (JNI + сеть) — вызывать НЕ в главном потоке.
+ * ВНИМАНИЕ: up()/down() блокирующие — вызывать НЕ в главном потоке.
  */
 object TunnelController {
 
     private const val TAG = "TunnelController"
-    const val DEFAULT_NAME = "wghome"
 
-    @Volatile private var backendRef: GoBackend? = null
+    @Volatile private var serviceFuture = CompletableFuture<DhaVpnService>()
 
-    /** Имя интерфейса; читается движком через Tunnel.getName(). */
-    @Volatile var tunnelName: String = DEFAULT_NAME
-
-    private val tunnel = object : Tunnel {
-        override fun getName(): String = sanitizeName(tunnelName)
-        override fun onStateChange(newState: Tunnel.State) {
-            Log.i(TAG, "Состояние туннеля: $newState")
-            AppState.update { it.copy(vpnActive = newState == Tunnel.State.UP) }
-        }
+    internal fun attach(s: DhaVpnService) {
+        if (serviceFuture.isDone) serviceFuture = CompletableFuture()
+        serviceFuture.complete(s)
     }
 
-    private fun backend(context: Context): GoBackend =
-        backendRef ?: synchronized(this) {
-            backendRef ?: GoBackend(context.applicationContext).also { backendRef = it }
-        }
+    internal fun detach(s: DhaVpnService) {
+        if (serviceFuture.getNow(null) === s) serviceFuture = CompletableFuture()
+    }
 
     /** null-Intent = согласие на VPN уже дано; иначе этот Intent надо запустить в Activity. */
-    fun prepareIntent(context: Context): Intent? = android.net.VpnService.prepare(context)
+    fun prepareIntent(context: Context): Intent? = VpnService.prepare(context)
 
     fun isAuthorized(context: Context): Boolean = prepareIntent(context) == null
 
-    /** Разбор текста .conf. Бросает при некорректном конфиге. */
-    fun parseConfig(text: String): Config = Config.parse(BufferedReader(StringReader(text)))
-
-    /** Поднять туннель. Блокирующий вызов. */
-    fun up(context: Context, config: Config): Tunnel.State =
-        backend(context).setState(tunnel, Tunnel.State.UP, config)
-
-    /** Опустить туннель. Блокирующий вызов. */
-    fun down(context: Context): Tunnel.State =
-        backend(context).setState(tunnel, Tunnel.State.DOWN, null)
-
-    fun currentState(context: Context): Tunnel.State =
-        try {
-            backend(context).getState(tunnel)
-        } catch (e: Exception) {
-            Tunnel.State.DOWN
+    /** Поднять туннель с профилем (или переключить работающий на другой). */
+    fun up(context: Context, profile: VpnProfile) {
+        val svc = serviceFuture.getNow(null) ?: run {
+            context.startService(Intent(context, DhaVpnService::class.java))
+            serviceFuture.get(5, TimeUnit.SECONDS)
         }
-
-    /** Человекочитаемое описание ошибки: у BackendException нет текста, суть в reason. */
-    fun describeError(e: Throwable): String = when (e) {
-        is BackendException -> "WireGuard: ${e.reason}"
-        else -> e.message ?: e.javaClass.simpleName
+        svc.startTunnel(profile)
     }
 
-    /** Имя интерфейса WireGuard: только допустимые символы, максимум 15. */
-    private fun sanitizeName(raw: String): String {
-        val cleaned = raw.filter { it.isLetterOrDigit() || it in "_=+.-" }
-        val name = cleaned.ifEmpty { DEFAULT_NAME }
-        return if (name.length > 15) name.substring(0, 15) else name
+    fun down(context: Context) {
+        serviceFuture.getNow(null)?.stopTunnel()
+    }
+
+    fun isUp(): Boolean = serviceFuture.getNow(null)?.isUp() == true
+
+    /** Задержка через профиль в мс, без поднятия туннеля. Блокирующий. */
+    fun probe(profile: VpnProfile): Int = Dhcore.probe(profile.core, "", 10_000)
+
+    fun describeError(e: Throwable): String {
+        val root = generateSequence(e) { it.cause }.last()
+        return root.message?.takeIf { it.isNotBlank() } ?: root.javaClass.simpleName
+    }
+}
+
+class DhaVpnService : VpnService() {
+
+    private var tunFd: Int = -1
+    @Volatile private var current: VpnProfile? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        TunnelController.attach(this)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
+
+    override fun onDestroy() {
+        stopTunnel()
+        TunnelController.detach(this)
+        super.onDestroy()
+    }
+
+    override fun onRevoke() {
+        Log.w(TAG, "VPN отозван системой")
+        stopTunnel()
+        AppState.update { it.copy(lastActionText = "VPN отключён системой (другой VPN или отзыв разрешения)") }
+        super.onRevoke()
+    }
+
+    fun isUp(): Boolean = current != null
+
+    @Synchronized
+    fun startTunnel(profile: VpnProfile) {
+        val b = Builder()
+            .setSession("Detour Home Auto · ${profile.name}")
+            .setMtu(profile.mtu())
+            .addAddress(Dhcore.TunAddress4, Dhcore.TunPrefix4.toInt())
+            .addAddress(Dhcore.TunAddress6, Dhcore.TunPrefix6.toInt())
+            .addDisallowedApplication(packageName)
+        val routes = profile.routes()
+        if (routes.isEmpty() || routes.contains("0.0.0.0/0")) {
+            // Весь IPv4 в туннель; IPv6 тоже заводим, чтобы он не шёл мимо — движок его отбрасывает.
+            b.addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer(Dhcore.TunDNS4)
+        } else {
+            for (r in routes) addRoute(b, r)
+            profile.dns().forEach { runCatching { b.addDnsServer(it) } }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) b.setMetered(false)
+
+        val pfd = b.establish() ?: throw IllegalStateException("нет согласия на VPN")
+        // fd переходит движку: он закроет его сам — при остановке или при переходе на новый fd.
+        val fd = pfd.detachFd()
+        try {
+            Dhcore.start(profile.core, fd, filesDir.resolve("core").absolutePath)
+        } catch (e: Exception) {
+            closeFd(fd)
+            throw e
+        }
+        tunFd = fd
+        current = profile
+        AppState.update { it.copy(vpnActive = true, activeProfileName = profile.name) }
+        Log.i(TAG, "туннель поднят: ${profile.name} (${profile.kind})")
+    }
+
+    @Synchronized
+    fun stopTunnel() {
+        if (current == null && tunFd < 0) return
+        runCatching { Dhcore.stop() }
+        tunFd = -1
+        current = null
+        AppState.update { it.copy(vpnActive = false) }
+        Log.i(TAG, "туннель опущен")
+    }
+
+    private fun addRoute(b: Builder, cidr: String) {
+        runCatching {
+            val (addr, len) = cidr.split("/").let { it[0] to (it.getOrNull(1)?.toInt() ?: -1) }
+            val ia = InetAddress.getByName(addr)
+            val bits = if (len >= 0) len else if (ia.address.size == 4) 32 else 128
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                b.addRoute(IpPrefix(ia, bits))
+            } else {
+                b.addRoute(ia, bits)
+            }
+        }.onFailure { Log.w(TAG, "маршрут $cidr пропущен: ${it.message}") }
+    }
+
+    private fun closeFd(fd: Int) {
+        runCatching { android.os.ParcelFileDescriptor.adoptFd(fd).close() }
+    }
+
+    private companion object {
+        const val TAG = "DhaVpnService"
     }
 }
