@@ -32,8 +32,8 @@ android {
         applicationId = "com.vtools.wghome"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "3.1"
+        versionCode = 6
+        versionName = "3.1.1"
 
     }
 
@@ -82,6 +82,8 @@ android {
             isEnable = true
             reset()
             include("arm64-v8a", "armeabi-v7a")
+            // Для эмулятора: ./gradlew assembleRelease -PwithX86 (ядро тогда собрать с android/amd64)
+            if (project.hasProperty("withX86")) include("x86_64")
             isUniversalApk = false
         }
     }

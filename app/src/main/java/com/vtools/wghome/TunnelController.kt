@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import io.github.varyen.dha.dhcore.Dhcore
 import java.net.InetAddress
@@ -24,6 +25,7 @@ object TunnelController {
     @Volatile private var serviceFuture = CompletableFuture<DhaVpnService>()
 
     internal fun attach(s: DhaVpnService) {
+        if (serviceFuture.getNow(null) === s) return
         if (serviceFuture.isDone) serviceFuture = CompletableFuture()
         serviceFuture.complete(s)
     }
@@ -63,7 +65,9 @@ object TunnelController {
 
 class DhaVpnService : VpnService() {
 
-    private var tunFd: Int = -1
+    // Свой экземпляр дескриптора: интерфейс VPN живёт, пока открыт хоть один, поэтому
+    // при остановке закрываем его сами, не полагаясь на то, когда движок отпустит свой.
+    private var tunPfd: ParcelFileDescriptor? = null
     @Volatile private var current: VpnProfile? = null
 
     override fun onCreate() {
@@ -71,7 +75,17 @@ class DhaVpnService : VpnService() {
         TunnelController.attach(this)
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Служба могла получить stopSelf() и тут же новый старт — onCreate тогда не повторяется.
+        TunnelController.attach(this)
+        // Система стартует службу сама при «Постоянном VPN»; туннель поднимает только приложение.
+        if (intent?.action == SERVICE_INTERFACE && current == null &&
+            !SettingsRepository.get(this).automationEnabled.value
+        ) {
+            stopSelf(startId)
+        }
+        return START_NOT_STICKY
+    }
 
     override fun onDestroy() {
         stopTunnel()
@@ -105,17 +119,23 @@ class DhaVpnService : VpnService() {
             profile.dns().forEach { runCatching { b.addDnsServer(it) } }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) b.setMetered(false)
+        // Неблокирующий fd: иначе Go откладывает его закрытие до первого прочитанного пакета,
+        // и после «выключить» интерфейс VPN висит, пока не придёт трафик.
+        b.setBlocking(false)
 
         val pfd = b.establish() ?: throw IllegalStateException("нет согласия на VPN")
-        // fd переходит движку: он закроет его сам — при остановке или при переходе на новый fd.
-        val fd = pfd.detachFd()
+        // Движку — копия: её он закроет сам (при остановке или при переходе на новый fd).
+        val fd = pfd.dup().detachFd()
         try {
             Dhcore.start(profile.core, fd, filesDir.resolve("core").absolutePath)
         } catch (e: Exception) {
             closeFd(fd)
+            runCatching { pfd.close() }
             throw e
         }
-        tunFd = fd
+        val old = tunPfd
+        tunPfd = pfd
+        runCatching { old?.close() }
         current = profile
         AppState.update { it.copy(vpnActive = true, activeProfileName = profile.name) }
         Log.i(TAG, "туннель поднят: ${profile.name} (${profile.kind})")
@@ -123,12 +143,17 @@ class DhaVpnService : VpnService() {
 
     @Synchronized
     fun stopTunnel() {
-        if (current == null && tunFd < 0) return
+        if (current == null && tunPfd == null) return
         runCatching { Dhcore.stop() }
-        tunFd = -1
+        runCatching { tunPfd?.close() }
+        tunPfd = null
         current = null
         AppState.update { it.copy(vpnActive = false) }
         Log.i(TAG, "туннель опущен")
+        // Как GoBackend в 2.x: служба уходит вместе с туннелем, ключ VPN в строке состояния гаснет.
+        // Отвязываемся сразу, чтобы следующий up() стартовал службу заново, а не застал её на выходе.
+        TunnelController.detach(this)
+        stopSelf()
     }
 
     private fun addRoute(b: Builder, cidr: String) {

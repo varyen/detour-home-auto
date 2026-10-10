@@ -47,6 +47,8 @@ class MonitorService : Service() {
     private var homeSafeState = false   // память гистерезиса: считали ли дом «надёжным»
     private val vpnExecutor = Executors.newSingleThreadExecutor()
     private val scope = MainScope()
+    // После stop() уже поставленная в очередь команда «включить» не должна поднять VPN обратно.
+    @Volatile private var stopped = false
 
     override fun onCreate() {
         super.onCreate()
@@ -192,6 +194,7 @@ class MonitorService : Service() {
     /** Управление встроенным туннелем в фоновом потоке (up/down блокирующие). */
     private fun applyVpn(up: Boolean, statusText: String) {
         vpnExecutor.execute {
+            if (stopped) return@execute
             try {
                 if (up) {
                     val profile = settings.activeProfile()
@@ -219,6 +222,7 @@ class MonitorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopped = true
         pending?.let { handler.removeCallbacks(it) }
         scope.cancel()
         networkCallback?.let {
@@ -227,7 +231,7 @@ class MonitorService : Service() {
             } catch (_: Exception) {
             }
         }
-        vpnExecutor.shutdown()
+        vpnExecutor.shutdownNow()
         AppState.update { it.copy(serviceRunning = false) }
     }
 
