@@ -22,6 +22,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/listener"
+	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/log"
 )
 
@@ -39,6 +40,7 @@ const (
 var (
 	mu      sync.Mutex
 	running bool
+	tunFd   int32 = -1
 	logMu   sync.Mutex
 	logRing []string
 	logOnce sync.Once
@@ -135,15 +137,15 @@ func buildConfig(p *Profile, fd int32) map[string]any {
 		tun["dns-hijack"] = []string{}
 	}
 	return map[string]any{
-		"mode":                "rule",
-		"log-level":           "info",
-		"ipv6":                false,
-		"allow-lan":           false,
-		"unified-delay":       true,
-		"tcp-concurrent":      true,
-		"find-process-mode":   "off",
-		"geodata-mode":        false,
-		"geo-auto-update":     false,
+		"mode":                      "rule",
+		"log-level":                 "info",
+		"ipv6":                      false,
+		"allow-lan":                 false,
+		"unified-delay":             true,
+		"tcp-concurrent":            true,
+		"find-process-mode":         "off",
+		"geodata-mode":              false,
+		"geo-auto-update":           false,
 		"global-client-fingerprint": "chrome",
 		"profile": map[string]any{
 			"store-selected": false,
@@ -180,13 +182,21 @@ func Start(profileJSON string, fd int32, home string) error {
 	if err != nil {
 		return fmt.Errorf("конфиг движка: %w", err)
 	}
+	if !running {
+		forgetTun()
+	}
 	executor.ApplyConfig(cfg, true)
 	// Ошибку создания tun ApplyConfig только пишет в журнал — проверяем сами.
 	if tc := listener.GetTunConf(); !tc.Enable || tc.FileDescriptor != int(fd) {
 		executor.Shutdown()
+		forgetTun()
 		running = false
 		return fmt.Errorf("движок не принял интерфейс туннеля: %s", lastError())
 	}
+	if prev := tunFd; prev != fd && releaseTun(prev) {
+		log.Warnln("[DHA] движок не отпустил прежний fd туннеля %d — закрыт принудительно", prev)
+	}
+	tunFd = fd
 	running = true
 	log.Infoln("[DHA] запущен профиль %s (%s)", p.Name, p.Kind)
 	return nil
@@ -200,8 +210,21 @@ func Stop() {
 		return
 	}
 	executor.Shutdown()
+	forgetTun()
+	if releaseTun(tunFd) {
+		log.Warnln("[DHA] движок не отпустил fd туннеля %d — закрыт принудительно", tunFd)
+	}
+	tunFd = -1
 	running = false
 	debug.FreeOSMemory()
+}
+
+// forgetTun сбрасывает память mihomo о прошлом tun. Shutdown закрывает listener, но
+// LastTunConf оставляет, а Android отдаёт новому туннелю тот же номер fd: конфиг
+// выходит «прежним», mihomo listener не создаёт, и туннель поднимается без движка —
+// трафик в никуда, а fd никто не закроет, так что интерфейс VPN переживает «выключить».
+func forgetTun() {
+	listener.LastTunConf = LC.Tun{}
 }
 
 func Running() bool {

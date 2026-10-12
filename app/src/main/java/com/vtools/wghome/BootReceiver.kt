@@ -8,10 +8,11 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 
-/** После перезагрузки восстанавливает мониторинг, если автоматизация была включена. */
+/** После перезагрузки и после обновления приложения восстанавливает мониторинг, если автоматизация была включена. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        val action = intent?.action
+        if (action != Intent.ACTION_BOOT_COMPLETED && action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         val settings = SettingsRepository.get(context)
         if (!settings.automationEnabled.value) return
         if (!WifiUtils.hasLocationPermission(context)) return
@@ -29,7 +30,7 @@ class BootReceiver : BroadcastReceiver() {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Автозапуск", NotificationManager.IMPORTANCE_DEFAULT)
-                .apply { description = "Проблемы с запуском мониторинга после перезагрузки" }
+                .apply { description = "Проблемы с запуском мониторинга после перезагрузки или обновления" }
         )
         val open = PendingIntent.getActivity(
             context, 0,
@@ -41,7 +42,7 @@ class BootReceiver : BroadcastReceiver() {
             .setContentText("Нужна геолокация «Разрешать всегда» — откройте приложение")
             .setStyle(
                 NotificationCompat.BigTextStyle().bigText(
-                    "После перезагрузки Android запрещает запуск службы мониторинга, пока " +
+                    "После перезагрузки или обновления Android запрещает запуск службы мониторинга, пока " +
                         "приложению не выдана геолокация «Разрешать всегда». Откройте приложение " +
                         "и выдайте разрешение."
                 )
