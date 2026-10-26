@@ -68,6 +68,15 @@ class MonitorService : Service() {
         registerCallback()
         AppState.update { it.copy(serviceRunning = true) }
         evaluateSoon()
+        // Раз в сутки — есть ли новая версия; о ней одно уведомление.
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            while (true) {
+                if (Updater.shouldAutoCheck(this@MonitorService, 24 * 3600 * 1000L)) {
+                    Updater.checkAndNotify(this@MonitorService)
+                }
+                kotlinx.coroutines.delay(3 * 3600 * 1000L)
+            }
+        }
         // Сеть не менялась, а список домашних сетей или строгий режим — да: пересчитать сразу.
         scope.launch {
             combine(settings.homeSsids, settings.strictWeakSignal) { a, b -> a to b }

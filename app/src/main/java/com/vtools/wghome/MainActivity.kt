@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Speed
@@ -151,6 +152,7 @@ private fun AppRoot() {
     val probes = remember { mutableStateMapOf<String, String>() }
     val subscriptions by settings.subscriptions.collectAsState()
     val subBusy = remember { mutableStateMapOf<String, Boolean>() }
+    val updateState by Updater.state.collectAsState()
     var showPaste by remember { mutableStateOf(false) }
     var engineLog by remember { mutableStateOf<String?>(null) }
 
@@ -402,6 +404,23 @@ private fun AppRoot() {
         refreshSubscription(VpnSubscription(id = VpnSubscription.newId(), url = u, title = Uri.parse(u).host ?: u))
     }
 
+    // Новая версия приложения — при открытии, не чаще раза в 12 часов (служба проверяет и сама, раз в сутки).
+    LaunchedEffect(Unit) {
+        if (Updater.state.value is Updater.State.Idle && Updater.shouldAutoCheck(context, 12 * 3600 * 1000L)) {
+            launch(Dispatchers.IO) { Updater.check(context) }
+        }
+    }
+
+    val onInstallUpdate = { r: Updater.Release ->
+        if (!Updater.canInstall(context)) {
+            toast("Разрешите установку из этого приложения и нажмите «Обновить» ещё раз")
+            runCatching { context.startActivity(Updater.installPermissionIntent(context)) }
+        } else {
+            scope.launch(Dispatchers.IO) { Updater.downloadAndInstall(context, r) }
+        }
+        Unit
+    }
+
     // Подписки обновляются при открытии приложения, если с прошлого раза прошло больше 12 часов.
     LaunchedEffect(Unit) {
         val stale = System.currentTimeMillis() - 12 * 3600 * 1000L
@@ -538,6 +557,13 @@ private fun AppRoot() {
                 detectedSsid = detectedSsid,
                 onAddCurrent = { onAddCurrent() },
                 onRemove = { settings.removeSsid(it) }
+            )
+
+            UpdateCard(
+                current = remember { Updater.currentVersion(context) },
+                state = updateState,
+                onCheck = { scope.launch(Dispatchers.IO) { Updater.check(context) } },
+                onInstall = onInstallUpdate
             )
 
             if (!batteryOk) {
@@ -850,6 +876,57 @@ private fun ago(ts: Long): String {
         m < 60 -> "$m мин назад"
         m < 48 * 60 -> "${m / 60} ч назад"
         else -> "${m / 1440} дн назад"
+    }
+}
+
+@Composable
+private fun UpdateCard(
+    current: String,
+    state: Updater.State,
+    onCheck: () -> Unit,
+    onInstall: (Updater.Release) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Обновление", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            val line = when (state) {
+                Updater.State.Idle -> "Версия $current"
+                Updater.State.Checking -> "Версия $current · проверяю…"
+                Updater.State.UpToDate -> "Версия $current — последняя"
+                is Updater.State.Available -> "Доступна версия ${state.release.version} (у вас $current)"
+                is Updater.State.Downloading -> "Скачиваю ${state.release.version}: ${state.percent}%"
+                is Updater.State.Failed -> "Версия $current · ${state.message}"
+            }
+            Text(
+                line,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (state is Updater.State.Failed) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (state is Updater.State.Available && state.release.notes.isNotBlank()) {
+                Text(
+                    state.release.notes.lines().filter { it.isNotBlank() && !it.startsWith("## ") }
+                        .take(8).joinToString("\n").replace("**", ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            when (state) {
+                is Updater.State.Available -> Button(onClick = { onInstall(state.release) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.SystemUpdate, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Обновить до ${state.release.version}")
+                }
+                is Updater.State.Downloading, Updater.State.Checking -> Unit
+                else -> OutlinedButton(onClick = onCheck, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Проверить обновления")
+                }
+            }
+        }
     }
 }
 
