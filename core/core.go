@@ -245,7 +245,8 @@ func Probe(profileJSON, url string, timeoutMs int32) (int32, error) {
 		return 0, err
 	}
 	defer px.Close()
-	if url == "" {
+	defaultURL := url == ""
+	if defaultURL {
 		url = "https://www.gstatic.com/generate_204"
 	}
 	if timeoutMs <= 0 {
@@ -254,6 +255,14 @@ func Probe(profileJSON, url string, timeoutMs int32) (int32, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 	ms, err := px.URLTest(ctx, url, nil)
+	// WireGuard/AmneziaWG с DNS из .conf резолвит имя через сам туннель, и в
+	// разовой проверке (без запущенного движка) этот резолв не отвечает, хотя
+	// туннель живой. Тогда меряем по IP — это всё равно проверка туннеля.
+	if err != nil && defaultURL && strings.Contains(err.Error(), "dns resolve failed") {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer cancel2()
+		ms, err = px.URLTest(ctx2, "http://1.1.1.1/", nil)
+	}
 	if err != nil {
 		return 0, err
 	}

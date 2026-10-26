@@ -70,29 +70,7 @@ func parseProfile(text, fallbackName string) (*Profile, error) {
 	if err != nil || len(proxies) == 0 {
 		return nil, errors.New("не похоже ни на ссылку (vless://, trojan://, ss://…), ни на .conf WireGuard")
 	}
-	px := proxies[0]
-	name, _ := px["name"].(string)
-	if strings.TrimSpace(name) == "" {
-		name = fallbackName
-	}
-	if strings.TrimSpace(name) == "" {
-		name = fmt.Sprint(px["type"])
-	}
-	px["name"] = "proxy"
-	kind := fmt.Sprint(px["type"])
-	if kind == "vless" {
-		if n, _ := px["network"].(string); n == "xhttp" {
-			kind = "vless-xhttp"
-		}
-		if _, ok := px["reality-opts"]; ok {
-			kind = "vless-reality"
-		}
-	}
-	p := &Profile{Name: name, Kind: kind, Server: fmt.Sprint(px["server"]), Proxy: px}
-	if _, err := buildProxy(p); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return profileFromProxy(proxies[0], fallbackName)
 }
 
 // Ключи [Interface] AmneziaWG → amnezia-wg-option mihomo.

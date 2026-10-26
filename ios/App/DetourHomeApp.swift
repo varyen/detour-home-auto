@@ -31,6 +31,8 @@ struct ContentView: View {
     @State private var toast: String?
     @State private var showLog = false
     @State private var showScanner = false
+    @State private var subBusy: Set<String> = []
+    @State private var removingSub: VpnSubscription?
 
     var body: some View {
         NavigationView {
@@ -66,14 +68,14 @@ struct ContentView: View {
                 }
 
                 Section(header: Text("Профили VPN"),
-                        footer: Text("WireGuard и AmneziaWG — файлом .conf; VLESS (Reality, ws, xhttp), Trojan, Shadowsocks, Hysteria2 — ссылкой. QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут.")) {
+                        footer: Text("WireGuard и AmneziaWG — файлом .conf; VLESS (Reality, TLS, WebSocket, xhttp), Trojan, Shadowsocks, Hysteria2 — ссылкой. Ссылка подписки https://… добавит все профили сразу; QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут.")) {
                     ForEach(store.profiles) { p in
                         HStack {
                             Image(systemName: p.id == store.active?.id ? "largecircle.fill.circle" : "circle")
                                 .foregroundColor(.accentColor)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(p.name).lineLimit(1)
-                                Text([p.kindLabel, p.server, probes[p.id]].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                                Text([p.kindLabel, p.server, subTitle(p), probes[p.id]].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
                                     .font(.caption).foregroundColor(.secondary).lineLimit(2)
                             }
                             Spacer()
@@ -97,6 +99,41 @@ struct ContentView: View {
                         showPaste = true
                     } label: { Label("Ссылка", systemImage: "doc.on.clipboard") }
                     Button { showScanner = true } label: { Label("Сканировать QR-код", systemImage: "qrcode.viewfinder") }
+                }
+
+                Section(header: Text("Подписки"),
+                        footer: Text("Ссылка подписки из панели Detour (карточка клиента → «Подписка») или от другого сервиса. Обновляются при открытии приложения раз в 12 часов.")) {
+                    ForEach(store.subscriptions) { sub in
+                        HStack {
+                            Image(systemName: "dot.radiowaves.up.forward").foregroundColor(.accentColor)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sub.title).lineLimit(1)
+                                Text(subLine(sub)).font(.caption)
+                                    .foregroundColor(!sub.error.isEmpty && !subBusy.contains(sub.id) ? .red : .secondary)
+                                    .lineLimit(2)
+                            }
+                            Spacer()
+                            Button { refresh(sub) } label: { Image(systemName: "arrow.clockwise") }
+                                .buttonStyle(.borderless)
+                                .disabled(subBusy.contains(sub.id))
+                        }
+                    }
+                    .onDelete { idx in removingSub = idx.map { store.subscriptions[$0] }.first }
+                    Button {
+                        let clip = UIPasteboard.general.string ?? ""
+                        pasteText = VpnSubscription.isURL(clip) ? clip : ""
+                        showPaste = true
+                    } label: { Label("Добавить подписку", systemImage: "plus") }
+                }
+                .confirmationDialog("Удалить подписку?", isPresented: Binding(get: { removingSub != nil }, set: { if !$0 { removingSub = nil } }), titleVisibility: .visible) {
+                    if let sub = removingSub {
+                        Button("Удалить с профилями", role: .destructive) {
+                            store.removeSubscription(sub.id, withProfiles: true); Task { await sync() }
+                        }
+                        Button("Оставить профили") {
+                            store.removeSubscription(sub.id, withProfiles: false); Task { await sync() }
+                        }
+                    }
                 }
 
                 Section(header: Text("Домашние сети"), footer: Text("В этих сетях VPN выключается.")) {
@@ -130,7 +167,11 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Detour Home Auto")
-            .onAppear { wifi.refresh() }
+            .onAppear {
+                wifi.refresh()
+                let stale = Date().addingTimeInterval(-12 * 3600)
+                store.subscriptions.filter { ($0.updatedAt ?? .distantPast) < stale }.forEach { refresh($0, quiet: true) }
+            }
             .onOpenURL { url in add(url.absoluteString, name: "") }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
                 guard case let .success(url) = result else { return }
@@ -199,8 +240,53 @@ struct ContentView: View {
         return t.isEmpty ? "Пусто. Журнал туннеля пишется в процессе расширения — смотрите Console.app по «DetourHomeTunnel»." : t
     }
 
+    private func subTitle(_ p: VpnProfile) -> String? {
+        guard let id = p.subId, let s = store.subscriptions.first(where: { $0.id == id }) else { return nil }
+        return "подписка \(s.title)"
+    }
+
+    private func subLine(_ s: VpnSubscription) -> String {
+        if subBusy.contains(s.id) { return "обновляю…" }
+        if !s.error.isEmpty { return "ошибка: \(s.error)" }
+        let n = store.profiles.filter { $0.subId == s.id }.count
+        guard let t = s.updatedAt else { return "профилей \(n)" }
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ru")
+        return "профилей \(n) · обновлена \(f.localizedString(for: t, relativeTo: Date()))"
+    }
+
+    private func refresh(_ sub: VpnSubscription, quiet: Bool = false) {
+        guard !subBusy.contains(sub.id) else { return }
+        subBusy.insert(sub.id)
+        DispatchQueue.global().async {
+            let result = Result { try VpnSubscription.fetch(sub.url, subId: sub.id) }
+            DispatchQueue.main.async {
+                subBusy.remove(sub.id)
+                switch result {
+                case let .success(r):
+                    store.apply(sub, title: r.title, fresh: r.profiles)
+                    Task { await sync() }
+                    if !quiet {
+                        toast = "Подписка «\(r.title.isEmpty ? sub.title : r.title)»: профилей \(r.profiles.count)"
+                            + (r.skipped > 0 ? ", пропущено \(r.skipped)" : "")
+                    }
+                case let .failure(e):
+                    store.markError(sub.id, e.localizedDescription)
+                    if !quiet { toast = "Подписка не обновилась: \(e.localizedDescription)" }
+                }
+            }
+        }
+    }
+
     @discardableResult
     private func add(_ text: String, name: String) -> Bool {
+        if VpnSubscription.isURL(text) {
+            let url = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sub = store.subscriptions.first { $0.url == url }
+                ?? VpnSubscription(id: UUID().uuidString, url: url, title: URL(string: url)?.host ?? url, updatedAt: nil)
+            refresh(sub)
+            return true
+        }
         do {
             let p = try VpnProfile.parse(text, fallbackName: name)
             store.add(p)

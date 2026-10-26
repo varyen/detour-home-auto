@@ -21,6 +21,9 @@ class SettingsRepository private constructor(context: Context) {
     private val _profiles = MutableStateFlow(VpnProfile.listFromJson(prefs.getString(KEY_PROFILES, null)))
     val profiles: StateFlow<List<VpnProfile>> = _profiles
 
+    private val _subscriptions = MutableStateFlow(VpnSubscription.listFromJson(prefs.getString(KEY_SUBS, null)))
+    val subscriptions: StateFlow<List<VpnSubscription>> = _subscriptions
+
     private val _activeId = MutableStateFlow(prefs.getString(KEY_ACTIVE, null))
     val activeId: StateFlow<String?> = _activeId
 
@@ -73,6 +76,55 @@ class SettingsRepository private constructor(context: Context) {
         saveProfiles(_profiles.value.map { if (it.id == id) it.copy(name = name.trim().ifEmpty { it.name }) else it })
     }
 
+    // ---------- подписки ----------
+
+    /**
+     * Профили подписки заменяются целиком. id сохраняется у профиля с тем же
+     * именем и видом: иначе после каждого обновления сбрасывался бы выбранный
+     * профиль (и «Автоматический режим» включал бы первый попавшийся).
+     */
+    @Synchronized
+    fun applySubscription(sub: VpnSubscription, fetched: FetchedSubscription) {
+        val old = _profiles.value.filter { it.subId == sub.id }
+        val keep = old.associateBy { it.name to it.kind }
+        val fresh = fetched.profiles.map { p ->
+            keep[p.name to p.kind]?.let { p.copy(id = it.id) } ?: p
+        }
+        val others = _profiles.value.filterNot { it.subId == sub.id }
+        saveProfiles(others + fresh)
+        val updated = sub.copy(
+            title = fetched.title.ifBlank { sub.title },
+            updatedAt = System.currentTimeMillis(),
+            error = "",
+        )
+        saveSubscriptions(_subscriptions.value.filterNot { it.id == sub.id } + updated)
+        if (activeProfile() == null || _profiles.value.none { it.id == _activeId.value }) {
+            setActive(_profiles.value.firstOrNull()?.id)
+        }
+    }
+
+    @Synchronized
+    fun markSubscriptionError(id: String, error: String) {
+        saveSubscriptions(_subscriptions.value.map { if (it.id == id) it.copy(error = error) else it })
+    }
+
+    @Synchronized
+    fun removeSubscription(id: String, withProfiles: Boolean) {
+        saveSubscriptions(_subscriptions.value.filterNot { it.id == id })
+        val list = if (withProfiles) _profiles.value.filterNot { it.subId == id }
+        else _profiles.value.map { if (it.subId == id) it.copy(subId = null) else it }
+        saveProfiles(list)
+        if (_profiles.value.none { it.id == _activeId.value }) setActive(_profiles.value.firstOrNull()?.id)
+    }
+
+    fun subscriptionUrlExists(url: String): Boolean =
+        _subscriptions.value.any { it.url.trim() == url.trim() }
+
+    private fun saveSubscriptions(list: List<VpnSubscription>) {
+        prefs.edit().putString(KEY_SUBS, VpnSubscription.listToJson(list)).apply()
+        _subscriptions.value = list
+    }
+
     fun setActive(id: String?) {
         prefs.edit().putString(KEY_ACTIVE, id).apply()
         _activeId.value = id
@@ -116,6 +168,7 @@ class SettingsRepository private constructor(context: Context) {
         private const val KEY_STRICT = "strict_weak_signal"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE = "active_profile"
+        private const val KEY_SUBS = "subscriptions"
         private const val KEY_LEGACY_CONFIG = "config_text"
         private const val KEY_LEGACY_TUNNEL = "tunnel_name"
 

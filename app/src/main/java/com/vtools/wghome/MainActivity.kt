@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VpnKey
@@ -147,6 +149,8 @@ private fun AppRoot() {
     val hasConfig = profiles.isNotEmpty()
     val activeProfile = profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull()
     val probes = remember { mutableStateMapOf<String, String>() }
+    val subscriptions by settings.subscriptions.collectAsState()
+    val subBusy = remember { mutableStateMapOf<String, Boolean>() }
     var showPaste by remember { mutableStateOf(false) }
     var engineLog by remember { mutableStateOf<String?>(null) }
 
@@ -368,8 +372,48 @@ private fun AppRoot() {
         Unit
     }
 
+    fun refreshSubscription(sub: VpnSubscription, quiet: Boolean = false) {
+        if (subBusy[sub.id] == true) return
+        subBusy[sub.id] = true
+        scope.launch(Dispatchers.IO) {
+            val msg = try {
+                val f = SubscriptionFetcher.fetch(sub.url, sub.id)
+                settings.applySubscription(sub, f)
+                "Подписка «${f.title.ifBlank { sub.title }}»: профилей ${f.profiles.size}" +
+                    if (f.skipped > 0) ", пропущено ${f.skipped} (протокол не поддерживается)" else ""
+            } catch (e: Exception) {
+                val err = TunnelController.describeError(e)
+                settings.markSubscriptionError(sub.id, err)
+                "Подписка не обновилась: $err"
+            }
+            withContext(Dispatchers.Main) {
+                subBusy.remove(sub.id)
+                if (!quiet) toast(msg)
+            }
+        }
+    }
+
+    fun addSubscription(url: String) {
+        val u = url.trim()
+        if (settings.subscriptionUrlExists(u)) {
+            settings.subscriptions.value.firstOrNull { it.url.trim() == u }?.let { refreshSubscription(it) }
+            return
+        }
+        refreshSubscription(VpnSubscription(id = VpnSubscription.newId(), url = u, title = Uri.parse(u).host ?: u))
+    }
+
+    // Подписки обновляются при открытии приложения, если с прошлого раза прошло больше 12 часов.
+    LaunchedEffect(Unit) {
+        val stale = System.currentTimeMillis() - 12 * 3600 * 1000L
+        settings.subscriptions.value.filter { it.updatedAt < stale }.forEach { refreshSubscription(it, quiet = true) }
+    }
+
     val addFromText = { text: String ->
-        try {
+        if (VpnSubscription.isUrl(text)) {
+            toast("Загружаю подписку…")
+            addSubscription(text)
+            true
+        } else try {
             val p = VpnProfile.parse(text, "")
             settings.addProfile(p)
             toast("Добавлен профиль: ${p.name} (${p.kindLabel})")
@@ -470,6 +514,7 @@ private fun AppRoot() {
                 profiles = profiles,
                 activeId = activeProfile?.id,
                 probes = probes,
+                subTitles = subscriptions.associate { it.id to it.title },
                 onSelect = onSelect,
                 onProbe = onProbe,
                 onRemove = { settings.removeProfile(it.id); probes.remove(it.id) },
@@ -477,6 +522,15 @@ private fun AppRoot() {
                 onPaste = { showPaste = true },
                 onScan = onScan,
                 onTest = { onTest() }
+            )
+
+            SubscriptionsCard(
+                subscriptions = subscriptions,
+                profileCount = { id -> profiles.count { it.subId == id } },
+                busy = subBusy,
+                onRefresh = { refreshSubscription(it) },
+                onRemove = { sub, withProfiles -> settings.removeSubscription(sub.id, withProfiles) },
+                onAdd = { showPaste = true }
             )
 
             HomeNetworksCard(
@@ -634,6 +688,7 @@ private fun ProfilesCard(
     profiles: List<VpnProfile>,
     activeId: String?,
     probes: Map<String, String>,
+    subTitles: Map<String, String>,
     onSelect: (VpnProfile) -> Unit,
     onProbe: (VpnProfile) -> Unit,
     onRemove: (VpnProfile) -> Unit,
@@ -656,8 +711,9 @@ private fun ProfilesCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Профили VPN", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(
-                if (profiles.isEmpty()) "WireGuard и AmneziaWG — файлом .conf, VLESS (Reality, ws, xhttp), " +
-                    "Trojan, Shadowsocks, Hysteria2 — ссылкой. QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут."
+                if (profiles.isEmpty()) "WireGuard и AmneziaWG — файлом .conf, VLESS (Reality, TLS, WebSocket, xhttp), " +
+                    "Trojan, Shadowsocks, Hysteria2 — ссылкой. Ссылка подписки https://… добавит все профили сразу; " +
+                    "QR-код из панели Detour и ключ Amnezia vpn:// тоже подойдут."
                 else "Вне дома включается отмеченный профиль",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -668,7 +724,12 @@ private fun ProfilesCard(
                     Column(Modifier.weight(1f)) {
                         Text(p.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            listOfNotNull(p.kindLabel, p.server.takeIf { it.isNotBlank() }, probes[p.id]).joinToString(" · "),
+                            listOfNotNull(
+                                p.kindLabel,
+                                p.server.takeIf { it.isNotBlank() },
+                                p.subId?.let { subTitles[it] }?.let { "подписка $it" },
+                                probes[p.id]
+                            ).joinToString(" · "),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
@@ -712,6 +773,87 @@ private fun ProfilesCard(
 }
 
 @Composable
+private fun SubscriptionsCard(
+    subscriptions: List<VpnSubscription>,
+    profileCount: (String) -> Int,
+    busy: Map<String, Boolean>,
+    onRefresh: (VpnSubscription) -> Unit,
+    onRemove: (VpnSubscription, Boolean) -> Unit,
+    onAdd: () -> Unit
+) {
+    var confirmRemove by remember { mutableStateOf<VpnSubscription?>(null) }
+    confirmRemove?.let { sub ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text("Удалить подписку?") },
+            text = { Text("${sub.title}\nПрофилей из неё: ${profileCount(sub.id)}") },
+            confirmButton = {
+                TextButton(onClick = { onRemove(sub, true); confirmRemove = null }) { Text("Удалить с профилями") }
+            },
+            dismissButton = {
+                TextButton(onClick = { onRemove(sub, false); confirmRemove = null }) { Text("Оставить профили") }
+            }
+        )
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Подписки", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (subscriptions.isEmpty()) "Ссылка подписки из панели Detour (карточка клиента → «Подписка») или " +
+                    "от другого сервиса — все профили сразу, и они обновляются сами."
+                else "Обновляются при открытии приложения раз в 12 часов",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            subscriptions.forEach { sub ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.RssFeed, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(sub.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                        val line = when {
+                            busy[sub.id] == true -> "обновляю…"
+                            sub.error.isNotBlank() -> "ошибка: ${sub.error}"
+                            else -> "профилей ${profileCount(sub.id)} · обновлена ${ago(sub.updatedAt)}"
+                        }
+                        Text(
+                            line,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (sub.error.isNotBlank() && busy[sub.id] != true) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { onRefresh(sub) }, enabled = busy[sub.id] != true) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Обновить подписку")
+                    }
+                    IconButton(onClick = { confirmRemove = sub }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Удалить подписку", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Добавить подписку")
+            }
+        }
+    }
+}
+
+private fun ago(ts: Long): String {
+    if (ts <= 0) return "никогда"
+    val m = (System.currentTimeMillis() - ts) / 60000
+    return when {
+        m < 1 -> "только что"
+        m < 60 -> "$m мин назад"
+        m < 48 * 60 -> "${m / 60} ч назад"
+        else -> "${m / 1440} дн назад"
+    }
+}
+
+@Composable
 private fun PasteDialog(initial: String, onDismiss: () -> Unit, onAdd: (String) -> Unit) {
     var text by remember { mutableStateOf(initial) }
     AlertDialog(
@@ -721,7 +863,7 @@ private fun PasteDialog(initial: String, onDismiss: () -> Unit, onAdd: (String) 
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
-                label = { Text("vless://… или текст .conf") },
+                label = { Text("vless://…, подписка https://… или текст .conf") },
                 minLines = 3,
                 maxLines = 8,
                 modifier = Modifier.fillMaxWidth()

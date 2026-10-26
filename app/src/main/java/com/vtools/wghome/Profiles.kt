@@ -15,6 +15,8 @@ data class VpnProfile(
     val kind: String,
     val server: String,
     val core: String,
+    /** id подписки, из которой профиль пришёл; null — добавлен вручную. */
+    val subId: String? = null,
 ) {
     val kindLabel: String
         get() = when (kind) {
@@ -23,6 +25,8 @@ data class VpnProfile(
             "vless" -> "VLESS"
             "vless-reality" -> "VLESS Reality"
             "vless-xhttp" -> "VLESS xhttp"
+            "vless-ws" -> "VLESS WebSocket"
+            "vless-tls" -> "VLESS TLS"
             "trojan" -> "Trojan"
             "ss" -> "Shadowsocks"
             "vmess" -> "VMess"
@@ -39,6 +43,7 @@ data class VpnProfile(
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("name", name).put("kind", kind).put("server", server).put("core", core)
+        .apply { subId?.let { put("sub", it) } }
 
     companion object {
         fun fromJson(o: JSONObject) = VpnProfile(
@@ -47,6 +52,7 @@ data class VpnProfile(
             kind = o.optString("kind"),
             server = o.optString("server"),
             core = o.getString("core"),
+            subId = o.optString("sub").ifBlank { null },
         )
 
         /**
