@@ -868,6 +868,17 @@ private fun SubscriptionsCard(
     }
 }
 
+/** Тело релиза — markdown с переносами по ширине: склеиваем продолжения строк, убираем разметку. */
+private fun releaseNotesPreview(md: String): String {
+    val out = mutableListOf<String>()
+    for (raw in md.lines()) {
+        if (raw.isBlank() || raw.startsWith("## ")) continue
+        if (raw.startsWith(" ") && out.isNotEmpty()) out[out.size - 1] = out.last() + " " + raw.trim()
+        else out += raw.trim()
+    }
+    return out.take(8).joinToString("\n").replace("**", "").replace("`", "")
+}
+
 private fun ago(ts: Long): String {
     if (ts <= 0) return "никогда"
     val m = (System.currentTimeMillis() - ts) / 60000
@@ -905,8 +916,7 @@ private fun UpdateCard(
             )
             if (state is Updater.State.Available && state.release.notes.isNotBlank()) {
                 Text(
-                    state.release.notes.lines().filter { it.isNotBlank() && !it.startsWith("## ") }
-                        .take(8).joinToString("\n").replace("**", ""),
+                    releaseNotesPreview(state.release.notes),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 8,
